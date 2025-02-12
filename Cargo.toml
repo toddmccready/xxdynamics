@@ -1,5 +1,6 @@
 [package]
 name = "xxdynamics"
+description = "I really don't like xppaut."
 version = "0.1.0"
 edition = "2021"
 
