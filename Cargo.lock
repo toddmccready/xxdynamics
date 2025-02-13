@@ -2090,6 +2090,7 @@ name = "xxdynamics"
 version = "0.1.0"
 dependencies = [
  "polars",
+ "rayon",
 ]
 
 [[package]]
