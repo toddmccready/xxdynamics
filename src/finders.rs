@@ -280,7 +280,7 @@ pub fn find_bifurcations(
             // Find equilibria
             let mut equilibria: Vec<f64> =
                 find_equilibria(&fp, domain, n_seeds, eq_tol, co_tol, n_ref, n_threads);
-
+            
             // Iterate over equilibria of previous iterates
             for &e in &fixed_invariants {
                 // Keep current equilibria if not found before
@@ -298,7 +298,7 @@ pub fn find_bifurcations(
 
             // Evaluate local behaviour of equilibria
             let (stable, attractive) = find_behaviour(&fp, &equilibria, n_steps, s_tol, a_scale);
-
+            
             // Record invariant states
             fixed_invariants.extend(&equilibria);
 
@@ -323,4 +323,63 @@ pub fn find_bifurcations(
 
     // Return information
     data
+}
+
+/// Find the attractors of a parameterized function
+pub fn find_attractors(
+    par_f: &(impl Fn(f64, f64) -> f64 + Sync),
+    par_space: (f64, f64),
+    n_pars: u32,
+    x0: f64,
+    n_burnin: u32,
+    n_hist: u32
+) -> DataFrame {
+    // Containers for recording orbit info
+    let mut data: Vec<DataFrame> = Vec::new();
+    
+    // Get bounds from parameter space
+    let (p_lb, p_ub) = par_space;
+    
+    // Seed parameter space with parameter values to check
+    let pars: Sequence = Sequence::new(p_lb, p_ub, n_pars);
+    
+    // Iterate over parameters
+    for p in pars {
+        // Create function with fixed parameter
+        let f = move |x: f64| par_f(x, p);
+        
+        let mut x_cur: f64 = x0;
+        // Run dynamical system for `n_warmup` iterations
+        for _ in 0..n_burnin {
+            x_cur = f(x_cur);
+        }
+        
+        // Container for forward orbit
+        let mut hist: Vec<f64> = Vec::<f64>::with_capacity(n_hist as usize);
+        let mut pars: Vec<f64> = Vec::<f64>::with_capacity(n_hist as usize);
+        
+        // Record iterations
+        for _ in 0..n_hist {
+            x_cur = f(x_cur);
+            
+            hist.push(x_cur);
+            pars.push(p);
+        }
+        
+        // Record information
+        let cur_data: DataFrame = df!(
+            "orbit" => hist,
+            "parameter" => pars
+        ).unwrap();
+        data.push(cur_data);
+    }
+    
+    // Collect data into dataframe
+    let mut final_data: DataFrame = data.pop().unwrap();
+    
+    for _ in 0..data.len() {
+        final_data.vstack_mut(&data.pop().unwrap()).unwrap();
+    }
+    
+    final_data
 }
