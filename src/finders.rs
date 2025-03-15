@@ -257,6 +257,23 @@ fn behaviour(
 }
 
 /// Get bifurcation data for a parameterized map.
+/// 
+/// # Parameters
+/// - `par_f`: A parameterized map of interest.
+/// - `par_space`: The range of parameters to evaluate.
+/// - `n_pars`: The number of parameters to evaluate.
+/// - `state_space`: The state space to scan for invariant sets.
+/// - `stepsize_range`: The minimum and maximum stepsizes allowed for the 
+/// adaptive finder.
+/// - `n_partitions`: The number of intervals to partition the state space 
+/// into.
+/// - `eq_tol`: The equilibrium tolerance.
+/// - `co_tol`: The coalesence tolerance.
+/// - `n_steps`: The number of steps to evaluate local behaviour.
+/// - `s_tol`: The tolerance for determining stability.
+/// - `a_scale`: The scaling factor for determining attraction.
+/// - `max_period`: The maximum period to look for.
+/// - `n_threads`: The number of threads to use.
 pub fn find_bifurcations(
     par_f: &(impl Fn(f64, f64) -> f64 + Sync),
     par_space: (f64, f64),
