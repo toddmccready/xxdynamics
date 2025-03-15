@@ -9,14 +9,22 @@ mod tests {
     #[test]
     fn play() {
         fn f(x: f64) -> f64 {
-            x.powi(2)
+            -3.0*x.cos()
         }
-
-        let e = finders::find_equilibria(&f, (-3.0, 3.0), 1e8 as u32, 1e-5, 1e-3, 1e8 as u32, 12);
-
-        println!("hi");
+        
+        let e: Vec<f64> = finders::find_periodics(
+            &f, 
+            1,
+            (-10.0, 10.0),
+            (1e-15, 1e-4),
+            100,
+            1e-7,
+            1e-3,
+            8);
+        
         for i in e {
-            println!("{i}");
+            println!("Equilibria: {} | Difference: {}", i, (f(i) - i).abs());
         }
+        
     }
 }
