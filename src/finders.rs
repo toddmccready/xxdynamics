@@ -1,114 +1,154 @@
-use crate::utils::{iterate, resolve_domain, Sequence};
+use core::f64;
+
+use crate::utils::{iterate, refiner, Sequence};
 use polars::prelude::*;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 
-/// Finds equilibria of a map `f` over a given domain.
+
+/// Adaptively find equilibria for a given map within a certain interval.
 ///
 /// # Parameters
 ///
 /// - `f`: A map of interest.
-/// - `domain`: A tuple containing the lower and upper bounds for the relevant
-///     domain.
-/// - `n_seeds`: The number of initial function evaluations to perform when
-///     searching for equilibria.
+/// - `state_space`: A tuple containing the lower and upper bounds for the relevant
+///     state space.
+/// - `stepsize_range`: The minimum and maximum stepsize allowed.
 /// - `eq_tol`: The tolerance for determining if a point is an equilibrium.
-/// - `co_tol`: The tolerance for how distant two points can be before being
-///     assigned to different "equilibrium groups".
-/// - `n_ref`: The number of points used for refining an equilibrium point.
+pub fn adaptive_finder(
+    f: &(impl Fn(f64) -> f64 + Sync),
+    state_space: (f64, f64),
+    stepsize_range: (f64, f64),
+    eq_tol: f64
+) -> Vec<f64> {
+    // Container for equilibria
+    let mut equilibria: Vec<f64> = vec![];
+    
+    // Unpack state space and stepsize ranges
+    let (lb, ub) = state_space;
+    let (min_step, max_step) = stepsize_range;
+    
+    let mut tracking: bool = false; // Tracker for distinct equilibria regions
+    let mut decreasing: bool; // Tracker for whether difference is decreasing
+    let mut cur_state: f64 = lb; // State of current iteration
+    let mut cur_diff: f64; // |f(state) - state| of current iteration
+    let mut min_diff: f64 = f64::INFINITY; // Min. diff for a unique region
+    let mut max_diff: f64 = f64::NAN; // Max. diff observed
+    let mut cur_step: f64; // Current iteration's stepsize
+    
+    // Iterate until upper bound is reached
+    while cur_state <= ub {
+        // Compute difference
+        cur_diff = (f(cur_state) - cur_state).abs();
+        
+        // Check if decreasing
+        decreasing = cur_diff <= min_diff;
+        
+        // Check equilibrium tolerance
+        if cur_diff < eq_tol {
+            if tracking & decreasing {            
+                // Replace last equilibrium
+                if let Some(last) = equilibria.last_mut() {
+                    *last = cur_state;
+                }
+                
+                // Update minimum difference
+                min_diff = cur_diff;
+            }
+            else if !tracking {
+                // Push new equilibrium
+                equilibria
+                .push(cur_state);
+                
+                // Reset min_diff and update tracker
+                min_diff = cur_diff;
+                tracking = true;
+            }
+        }
+        else {
+            tracking = false;
+        }
+        
+        // Update maximum difference
+        max_diff = f64::max(cur_diff, max_diff);
+        
+        // Compute current stepsize
+        if decreasing {
+            cur_step = min_step + (max_step - min_step) * (cur_diff / max_diff);
+        } else { // Pull stepsize upwards if not decreasing
+            cur_step = min_step + (max_step - min_step) * (cur_diff / max_diff).sqrt();
+        }
+        
+        // Move to next state
+        cur_state = cur_state + cur_step;
+    }
+
+    equilibria
+}
+
+
+/// Finds equilibria of a map `f` over a given domain.
 pub fn find_equilibria(
     f: &(impl Fn(f64) -> f64 + Sync),
-    domain: (f64, f64),
-    n_seeds: u32,
+    state_space: (f64, f64),
+    stepsize_range: (f64, f64),
+    n_partitions: u64,
     eq_tol: f64,
     co_tol: f64,
-    n_ref: u32,
     n_threads: usize,
 ) -> Vec<f64> {
-    // Get bounds from domain
-    let (lb, ub): (f64, f64) = domain;
-
-    // Split domain into chunks based on number of threads
-    let chunk_stepsize: f64 = (ub - lb) / n_threads as f64;
-    let chunks: Vec<Sequence> = (0..n_threads)
-        .map(|i: usize| {
-            Sequence::new(
-                lb + i as f64 * chunk_stepsize,
-                lb + (i + 1) as f64 * chunk_stepsize,
-                n_seeds / n_threads as u32,
+    // Get bounds from state space
+    let (lb, ub): (f64, f64) = state_space;
+    
+    // Compute length of partitions
+    let length: f64 = (ub - lb) / (n_partitions as f64);
+    
+    // Check if stepsizes are less than partition length
+    if (length, length) < stepsize_range {
+        panic!("Stepsizes should not be less than partition length.");
+    }
+    
+    // Partition state space
+    let partitions: Vec<(f64, f64)> = (0..n_partitions).into_iter()
+        .map(|i| {
+            (
+                lb + (i as f64) * length, 
+                lb + ((i + 1) as f64) * length
             )
         })
         .collect();
-
+    
     // Create threadpool
     let pool = ThreadPoolBuilder::new()
         .num_threads(n_threads)
         .build()
         .unwrap();
-
-    // Iterate over chunks
-    let approx_equilibria: Vec<Vec<f64>> = pool.install(|| {
-        chunks
-            .par_iter()
-            .map(|seq: &Sequence| {
-                // Allocate vector for approximate equilibria
-                let mut approx_equilibria: Vec<f64> = Vec::new();
-
-                // Iterate over seeds
-                for seed in *seq {
-                    // copy occurs
-                    // Evaluate current seed
-                    let seed_val: f64 = f(seed);
-
-                    // Check equilibrium tolerance
-                    if (seed_val - seed).abs() < eq_tol {
-                        approx_equilibria.push(seed);
-                    }
-                }
-
-                approx_equilibria
+    
+    // Iterate over partition in parallel
+    let equilibria: Vec<Vec<f64>> = pool.install(|| {
+        partitions
+            .into_par_iter()
+            .map(|cur_state_space | {
+                // Find equilibria in current partition
+                adaptive_finder(f, cur_state_space, stepsize_range, eq_tol)
             })
             .collect()
     });
-
+    
     // Collect parallel evaluations
-    let approx_equilibria: Vec<f64> = approx_equilibria.into_iter().flatten().collect();
-
-    // Check if equilibria exists
-    if approx_equilibria.is_empty() {
-        return approx_equilibria;
+    let equilibria: Vec<f64> = equilibria
+        .into_iter()
+        .flatten()
+        .collect();
+    
+    // Check if any equilibria exists
+    if equilibria.is_empty() {
+        return equilibria;
     }
-
-    // Strip domain into regions with equilibria
-    let intervals: Vec<(f64, f64)> = resolve_domain(&approx_equilibria, co_tol);
-
-    // Initialize vector for refined equilibria
-    let mut equilibria: Vec<f64> = Vec::new();
-
-    // Iterate over intervals
-    for (lb, ub) in intervals {
-        // Identify best equilibrium value
-        let mut best: f64 = lb;
-        let mut best_diff: f64 = (f(best) - best).abs();
-
-        // Seed interval with points to check
-        let seq: Sequence = Sequence::new(lb, ub, n_ref);
-
-        // Iterate over approximate equilibria
-        let mut cur_diff: f64;
-        for cur_eq in seq {
-            cur_diff = (f(cur_eq) - cur_eq).abs();
-
-            if cur_diff < best_diff {
-                best = cur_eq;
-                best_diff = cur_diff;
-            }
-        }
-
-        // Include refined equilibrium point
-        equilibria.push(best);
-    }
-
+    
+    
+    let equilibria: Vec<f64> = refiner(&f, &equilibria, co_tol);
+    
     equilibria
 }
 
@@ -118,28 +158,27 @@ pub fn find_equilibria(
 ///
 /// - `f`: A map of interest.
 /// - `n_iter`: `n_iter`-th map to evaluate.
-/// - `domain`: A tuple containing the lower and upper bounds for the relevant
-///     domain.
+/// - `state_space`: A tuple containing the lower and upper bounds for the relevant
+///     state space.
 /// - `n_seeds`: The number of initial function evaluations to perform when
 ///     searching for equilibria.
 /// - `eq_tol`: The tolerance for determining if a point is an equilibrium.
 /// - `co_tol`: The tolerance for how distant two points can be before being
 ///     assigned to different "equilibrium groups".
-/// - `n_ref`: The number of points used for refining an equilibrium point.
 /// - `n_threads`: Number of threads to use when evaluating seeds.
 pub fn find_periodics(
     f: &(impl Fn(f64) -> f64 + Sync),
-    n_iter: i32,
-    domain: (f64, f64),
-    n_seeds: u32,
+    n_iter: u64,
+    state_space: (f64, f64),
+    stepsize_range: (f64, f64),
+    n_partitions: u64,
     eq_tol: f64,
     co_tol: f64,
-    n_ref: u32,
     n_threads: usize,
 ) -> Vec<f64> {
     let f = iterate(f, n_iter);
-
-    find_equilibria(&f, domain, n_seeds, eq_tol, co_tol, n_ref, n_threads)
+    
+    find_equilibria(&f, state_space, stepsize_range, n_partitions, eq_tol, co_tol, n_threads)
 }
 
 /// Find local behaviour of a set of equilibria for a map `f`.
@@ -154,7 +193,7 @@ pub fn find_periodics(
 pub fn find_behaviour(
     f: &impl Fn(f64) -> f64,
     equilibria: &[f64],
-    n_steps: i32,
+    n_steps: u64,
     s_tol: f64,
     a_scale: f64,
 ) -> (Vec<bool>, Vec<bool>) {
@@ -186,7 +225,7 @@ pub fn find_behaviour(
 fn behaviour(
     f: &impl Fn(f64) -> f64,
     e: f64,
-    n_steps: i32,
+    n_steps: u64,
     s_tol: f64,
     a_scale: f64,
 ) -> (bool, bool) {
@@ -218,43 +257,25 @@ fn behaviour(
 }
 
 /// Get bifurcation data for a parameterized map.
-///
-/// # Parameters
-/// - `par_f`: A parameterized map of interest f(x, p).
-/// - `par_space`: Parameter space under consideration(similar to `domain`).
-/// - `n_pars`: Number of parameter values to evaluate.
-/// - `domain`: A tuple containing the lower and upper bounds for the relevant
-///     domain.
-/// - `n_seeds`: The number of initial function evaluations to perform when
-///     searching for equilibria.
-/// - `eq_tol`: The tolerance for determining if a point is an equilibrium.
-/// - `co_tol`: The tolerance for how distant two points can be before being
-///     assigned to different "equilibrium groups".
-/// - `n_ref`: The number of points used for refining an equilibrium point.
-/// - `n_steps`: The number of steps to use when evaluating the forward
-///     trajectory.
-/// - `s_tol`: Tolerance used for assessing stability.
-/// - `a_scale`: Scaling of `s_tol` to check for convergence.
-/// - `max_period`: Maximum period for a periodic point to look for.
 pub fn find_bifurcations(
     par_f: &(impl Fn(f64, f64) -> f64 + Sync),
     par_space: (f64, f64),
-    n_pars: u32,
-    domain: (f64, f64),
-    n_seeds: u32,
+    n_pars: u64,
+    state_space: (f64, f64),
+    stepsize_range: (f64, f64),
+    n_partitions: u64,
     eq_tol: f64,
     co_tol: f64,
-    n_ref: u32,
-    n_steps: i32,
+    n_steps: u64,
     s_tol: f64,
     a_scale: f64,
-    max_period: i32,
+    max_period: u64,
     n_threads: usize,
 ) -> DataFrame {
     // Containers for recording bifurcation info
     let mut par_info: Vec<f64> = Vec::new();
     let mut state_info: Vec<f64> = Vec::new();
-    let mut per_info: Vec<i32> = Vec::new();
+    let mut per_info: Vec<u64> = Vec::new();
     let mut stable_info: Vec<bool> = Vec::new();
     let mut attr_info: Vec<bool> = Vec::new();
 
@@ -276,10 +297,10 @@ pub fn find_bifurcations(
         for period in 1..=max_period {
             // Create function iterate
             let fp = iterate(f, period);
-
+            
             // Find equilibria
             let mut equilibria: Vec<f64> =
-                find_equilibria(&fp, domain, n_seeds, eq_tol, co_tol, n_ref, n_threads);
+                find_periodics(&f, period, state_space, stepsize_range, n_partitions, eq_tol, co_tol, n_threads);
             
             // Iterate over equilibria of previous iterates
             for &e in &fixed_invariants {
@@ -295,7 +316,7 @@ pub fn find_bifurcations(
                     })
                     .collect();
             }
-
+            
             // Evaluate local behaviour of equilibria
             let (stable, attractive) = find_behaviour(&fp, &equilibria, n_steps, s_tol, a_scale);
             
@@ -310,7 +331,7 @@ pub fn find_bifurcations(
             attr_info.extend(&attractive);
         }
     }
-
+    
     // Collect into dataframe
     let data: DataFrame = df!(
         "parameter" => par_info,
@@ -329,15 +350,17 @@ pub fn find_bifurcations(
 pub fn find_attractors(
     par_f: &(impl Fn(f64, f64) -> f64 + Sync),
     par_space: (f64, f64),
-    n_pars: u32,
-    x0: f64,
-    n_burnin: u32,
-    n_hist: u32
+    n_pars: u64,
+    init_states: &[f64],
+    n_burnin: u64,
+    n_hist: u64
 ) -> DataFrame {
     // Containers for recording orbit info
-    let mut data: Vec<DataFrame> = Vec::new();
+    let mut par_info: Vec<f64> = Vec::<f64>::new();
+    let mut init_info: Vec<f64> = Vec::<f64>::new();
+    let mut orbit_info: Vec<f64> = Vec::<f64>::new();
     
-    // Get bounds from parameter space
+    // Get bounds
     let (p_lb, p_ub) = par_space;
     
     // Seed parameter space with parameter values to check
@@ -348,38 +371,85 @@ pub fn find_attractors(
         // Create function with fixed parameter
         let f = move |x: f64| par_f(x, p);
         
-        let mut x_cur: f64 = x0;
-        // Run dynamical system for `n_warmup` iterations
+        // Iterate over initial states
+        for x0 in init_states {
+            let mut x_cur: f64 = x0.clone();
+            
+            // Run dynamical system for `n_burnin` iterations
+            for _ in 0..n_burnin {
+                x_cur = f(x_cur);
+            }
+            
+            // Record orbit iterations
+            for _ in 0..n_hist {
+                x_cur = f(x_cur);
+                
+                par_info.push(p);
+                init_info.push(*x0);
+                orbit_info.push(x_cur);
+            }
+        }
+    }
+    
+    // Record information
+    let data: DataFrame = df!(
+        "parameter" => par_info,
+        "initial_state" => init_info,
+        "orbit" => orbit_info
+    ).unwrap();
+    
+    data
+}
+
+pub fn cobweb(
+    f: &(impl Fn(f64) -> f64 + Sync),
+    init_states: &[f64],
+    n_burnin: u64,
+    n_iters: u64
+) -> DataFrame {
+    let mut x_info: Vec<f64> = 
+        Vec::with_capacity(1 + 2 * init_states.len() * (n_iters as usize));
+    let mut y_info: Vec<f64> = 
+        Vec::with_capacity(1 + 2 * init_states.len() * (n_iters as usize));
+    let mut init_info: Vec<f64> = 
+        Vec::with_capacity(1 + 2 * init_states.len() * (n_iters as usize));
+    
+    // Iterate over initial states
+    for x0 in init_states {
+        let mut x_cur: f64 = x0.clone();
+        
+        // Go through burn-in iterations
         for _ in 0..n_burnin {
             x_cur = f(x_cur);
         }
         
-        // Container for forward orbit
-        let mut hist: Vec<f64> = Vec::<f64>::with_capacity(n_hist as usize);
-        let mut pars: Vec<f64> = Vec::<f64>::with_capacity(n_hist as usize);
+        // Initialize cobweb
+        x_info.push(x_cur);
+        y_info.push(0.0);
+        init_info.push(*x0);
         
-        // Record iterations
-        for _ in 0..n_hist {
+        // Start cobwebbing
+        for _ in 0..n_iters {
+            // Move vertically to map
+            x_info.push(x_cur);
+            y_info.push(f(x_cur));
+            init_info.push(*x0);
+            
+            // Update state
             x_cur = f(x_cur);
             
-            hist.push(x_cur);
-            pars.push(p);
+            // Move horizontally to y=x
+            x_info.push(x_cur);
+            y_info.push(x_cur);
+            init_info.push(*x0);
         }
-        
-        // Record information
-        let cur_data: DataFrame = df!(
-            "orbit" => hist,
-            "parameter" => pars
-        ).unwrap();
-        data.push(cur_data);
     }
     
-    // Collect data into dataframe
-    let mut final_data: DataFrame = data.pop().unwrap();
+    let data: DataFrame = df!(
+        "initial_state" => init_info,
+        "x" => x_info,
+        "y" => y_info
+    ).unwrap();
     
-    for _ in 0..data.len() {
-        final_data.vstack_mut(&data.pop().unwrap()).unwrap();
-    }
-    
-    final_data
+    return data
 }
